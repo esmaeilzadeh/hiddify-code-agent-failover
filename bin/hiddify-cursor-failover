@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Cache root Hiddify Clash secret once, then run the failover tool.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT="$ROOT_DIR/hiddify_cursor_failover.py"
+CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hiddify-cursor"
+SECRET_FILE="$CONF_DIR/clash_secret"
+ROOT_CFG="${HIDDIFY_ROOT_CONFIG:-/root/.local/share/hiddify/data/current-config.json}"
+
+mkdir -p "$CONF_DIR"
+chmod 700 "$CONF_DIR"
+
+refresh_secret() {
+  echo "Reading Clash API secret from root Hiddify config (sudo)…"
+  local secret port controller
+  secret="$(sudo python3 -c "import json;print(json.load(open('$ROOT_CFG'))['experimental']['clash_api']['secret'])")"
+  controller="$(sudo python3 -c "import json;print(json.load(open('$ROOT_CFG'))['experimental']['clash_api'].get('external_controller','127.0.0.1:16756'))")"
+  port="${controller##*:}"
+  # Live listener may differ from config (observed: config 16756, live 16757).
+  if ss -ltn | awk '{print $4}' | grep -qE ":16757$"; then
+    port=16757
+  elif ss -ltn | awk '{print $4}' | grep -qE ":${port}$"; then
+    :
+  elif ss -ltn | awk '{print $4}' | grep -qE ":16756$"; then
+    port=16756
+  fi
+  umask 077
+  printf '%s\n' "$secret" >"$SECRET_FILE"
+  printf '%s\n' "$port" >"$CONF_DIR/clash_port"
+  echo "Cached secret -> $SECRET_FILE (port $port)"
+}
+
+cmd="${1:-}"
+if [[ "$cmd" == "refresh-secret" ]]; then
+  refresh_secret
+  exit 0
+fi
+
+if [[ ! -f "$SECRET_FILE" ]]; then
+  refresh_secret
+fi
+
+export HIDDIFY_CLASH_SECRET
+HIDDIFY_CLASH_SECRET="$(cat "$SECRET_FILE")"
+port="$(cat "$CONF_DIR/clash_port" 2>/dev/null || echo 16757)"
+export HIDDIFY_CLASH_API="http://127.0.0.1:${port}"
+
+exec python3 "$SCRIPT" --api "$HIDDIFY_CLASH_API" "$@"

@@ -1,0 +1,13 @@
+[Unit]
+Description=Hiddify best-node failover for Cursor
+After=network-online.target
+
+[Service]
+Type=simple
+# install.sh rewrites ExecStart to the absolute repo path.
+ExecStart=/home/mohamad/Tools/failover/bin/hiddify-cursor-failover watch --interval 20 --bad-ms 1500 --fail-threshold 2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

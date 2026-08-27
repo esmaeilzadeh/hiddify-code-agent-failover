@@ -1,0 +1,21 @@
+# Local / secrets
+.config/
+*.secret
+clash_secret
+clash_port
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Logs
+*.log
