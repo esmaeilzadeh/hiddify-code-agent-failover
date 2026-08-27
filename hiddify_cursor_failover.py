@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Pick the best Hiddify outbound for Cursor and fail over when quality drops.
+"""Patch Hiddify for Cursor, then pick/failover the best subscription node.
+
+1. Fix Hiddify prefs / TUN (MTU, DNS strategy, mux/fragment/WARP off, …)
+2. Prefer Reality TCP outbounds (avoid ws/http/xhttp/CDN buffering)
+3. URL-test against Cursor and select the lowest-latency working node
+4. In watch mode, switch when quality drops
 
 Talks to Hiddify's Clash-compatible API (usually 127.0.0.1:16756 or :16757).
-Because Hiddify often runs as root, the API secret is read from root's
-current-config.json via sudo (or from env / cached secret / --secret).
 
 Examples:
+  ./bin/hiddify-cursor-failover patch
   ./bin/hiddify-cursor-failover once
   ./bin/hiddify-cursor-failover watch
   ./bin/hiddify-cursor-failover refresh-secret
@@ -25,6 +29,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
+
+from hiddify_cursor_patch import load_preferred_nodes, patch_hiddify
 
 DEFAULT_CONFIG_CANDIDATES = (
     "/root/.local/share/hiddify/data/current-config.json",
@@ -285,6 +291,8 @@ def pick_and_select(
     test_url: str,
     timeout_ms: int,
     exclude: Optional[set[str]] = None,
+    preferred: Optional[list[str]] = None,
+    prefer_reality_tcp: bool = True,
 ) -> Optional[tuple[str, int]]:
     proxies = api.proxies()
     if group not in proxies:
@@ -295,10 +303,26 @@ def pick_and_select(
     if not names:
         log("No candidate nodes after filtering.")
         return None
-    ranked = rank_nodes(api, names, test_url, timeout_ms)
+
+    preferred_set = set(preferred or [])
+    primary = names
+    if prefer_reality_tcp and preferred_set:
+        primary = [n for n in names if n in preferred_set]
+        if primary:
+            log(f"Restricting search to {len(primary)} Reality TCP nodes (of {len(names)})")
+        else:
+            log("No Reality TCP overlap with subscription list; testing all candidates")
+            primary = names
+
+    ranked = rank_nodes(api, primary, test_url, timeout_ms)
+    if not ranked and primary is not names:
+        log("All preferred Reality TCP nodes failed; falling back to full candidate list")
+        ranked = rank_nodes(api, names, test_url, timeout_ms)
     if not ranked:
         if test_url != FALLBACK_TEST_URL:
             log("All Cursor URL tests failed; retrying with Cloudflare 204…")
+            ranked = rank_nodes(api, primary, FALLBACK_TEST_URL, timeout_ms)
+        if not ranked and primary is not names:
             ranked = rank_nodes(api, names, FALLBACK_TEST_URL, timeout_ms)
         if not ranked:
             return None
@@ -311,6 +335,27 @@ def pick_and_select(
         api.select(group, best_name)
         api.close_connections()
     return best_name, best_ms
+
+
+def maybe_patch(args: argparse.Namespace) -> list[str]:
+    if getattr(args, "skip_patch", False):
+        log("Skipping Hiddify config patch (--skip-patch)")
+        return load_preferred_nodes(args.config)
+    result = patch_hiddify()
+    for note in result.notes:
+        log(f"note: {note}")
+    # Only trust preferred tags from the live (root) config when available.
+    preferred = load_preferred_nodes(args.config)
+    if preferred:
+        return preferred
+    if result.live_config and result.live_config.startswith("/root/"):
+        return result.preferred_nodes
+    if result.preferred_nodes:
+        log(
+            "note: preferred list came from a non-root config copy; "
+            "ignoring it to avoid mismatched tags vs the live subscription"
+        )
+    return []
 
 
 def measure_current(
@@ -326,9 +371,28 @@ def measure_current(
     return current, api.delay(current, test_url, timeout_ms)
 
 
+def cmd_patch(args: argparse.Namespace) -> int:
+    result = patch_hiddify()
+    for note in result.notes:
+        log(f"note: {note}")
+    log(
+        f"Done. prefs_changed={len(result.prefs_changed)} "
+        f"live_changed={result.live_changed} preferred_nodes={len(result.preferred_nodes)}"
+    )
+    return 0
+
+
 def cmd_once(args: argparse.Namespace) -> int:
+    preferred = maybe_patch(args)
     api = discover_api(args.secret, args.api, args.config)
-    result = pick_and_select(api, args.group, args.test_url, args.timeout_ms)
+    result = pick_and_select(
+        api,
+        args.group,
+        args.test_url,
+        args.timeout_ms,
+        preferred=preferred,
+        prefer_reality_tcp=not args.all_nodes,
+    )
     if not result:
         log("No working node found.")
         return 1
@@ -337,11 +401,19 @@ def cmd_once(args: argparse.Namespace) -> int:
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
+    preferred = maybe_patch(args)
     api = discover_api(args.secret, args.api, args.config)
     fail_streak = 0
     last_switch = 0.0
 
-    pick_and_select(api, args.group, args.test_url, args.timeout_ms)
+    pick_and_select(
+        api,
+        args.group,
+        args.test_url,
+        args.timeout_ms,
+        preferred=preferred,
+        prefer_reality_tcp=not args.all_nodes,
+    )
 
     while True:
         time.sleep(args.interval)
@@ -370,6 +442,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
             args.test_url,
             args.timeout_ms,
             exclude=exclude,
+            preferred=preferred,
+            prefer_reality_tcp=not args.all_nodes,
         )
         if result:
             last_switch = now
@@ -386,12 +460,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--group", default="select", help="Selector group tag (default: select)")
     p.add_argument("--test-url", default=DEFAULT_TEST_URL, help="URL used for delay tests")
     p.add_argument("--timeout-ms", type=int, default=5000, help="Per-node delay test timeout")
+    p.add_argument(
+        "--skip-patch",
+        action="store_true",
+        help="Do not patch Hiddify prefs/TUN before selecting nodes",
+    )
+    p.add_argument(
+        "--all-nodes",
+        action="store_true",
+        help="URL-test all subscription nodes (not only Reality TCP)",
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    once = sub.add_parser("once", help="Select best node once and exit")
+    patch = sub.add_parser("patch", help="Only patch Hiddify prefs/TUN for Cursor")
+    patch.set_defaults(func=cmd_patch)
+
+    once = sub.add_parser("once", help="Patch (unless --skip-patch), then select best node")
     once.set_defaults(func=cmd_once)
 
-    watch = sub.add_parser("watch", help="Monitor and auto-failover")
+    watch = sub.add_parser("watch", help="Patch, select best node, then auto-failover")
     watch.add_argument("--interval", type=float, default=20.0, help="Seconds between health checks")
     watch.add_argument("--bad-ms", type=int, default=1500, help="Latency above this triggers switch")
     watch.add_argument(
@@ -408,7 +495,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     watch.set_defaults(func=cmd_watch)
     return p
-
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)

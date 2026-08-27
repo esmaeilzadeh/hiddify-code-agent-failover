@@ -8,6 +8,9 @@ CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hiddify-cursor"
 SECRET_FILE="$CONF_DIR/clash_secret"
 ROOT_CFG="${HIDDIFY_ROOT_CONFIG:-/root/.local/share/hiddify/data/current-config.json}"
 
+export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+cd "$ROOT_DIR"
+
 mkdir -p "$CONF_DIR"
 chmod 700 "$CONF_DIR"
 
