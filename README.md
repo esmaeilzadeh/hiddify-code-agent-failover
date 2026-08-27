@@ -1,5 +1,9 @@
 # Hiddify Cursor Failover
 
+<p align="center">
+  <img src="logo.png" alt="Hiddify Cursor Failover" width="280">
+</p>
+
 Two-step toolkit for **Cursor Agent** over **Hiddify** on Linux:
 
 1. **Patch** Hiddify prefs / TUN for stable Agent streams (DNS strategy, MTU, stack, mux/fragment/WARP off)
