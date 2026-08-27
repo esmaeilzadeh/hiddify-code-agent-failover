@@ -121,3 +121,4 @@ failover/
 ## License
 
 MIT
+# hiddify-code-agent-failover

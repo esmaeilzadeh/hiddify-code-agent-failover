@@ -1,21 +1,48 @@
-# Local / secrets
+# Secrets / local config (never commit)
 .config/
-*.secret
+hiddify-cursor/
 clash_secret
 clash_port
+*.secret
+.env
+.env.*
+!.env.example
 
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
 .venv/
 venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Logs / runtime
+*.log
+*.pid
+*.tmp
+*.temp
+*.bak
+*.orig
 
 # Editor / OS
 .DS_Store
+Thumbs.db
 .idea/
 .vscode/
 *.swp
+*.swo
 *~
-
-# Logs
-*.log
+.directory
