@@ -4,12 +4,43 @@
   <img src="logo.png" alt="Hiddify Cursor Failover" width="280">
 </p>
 
-Two-step toolkit for **Cursor Agent** over **Hiddify** on Linux:
+Keeps **Cursor Agent** stable over **Hiddify** on Linux: it picks a good server and switches automatically when the connection gets bad.
 
-1. **Patch** Hiddify prefs / TUN for stable Agent streams (DNS strategy, MTU, stack, mux/fragment/WARP off)
-2. **Failover** — pick the best node in the current subscription (prefer Reality TCP), then auto-switch when quality drops
+---
 
-Uses Hiddify’s Clash-compatible API. No extra Python deps (stdlib only).
+## Install (one time) / نصب (یک‌بار)
+
+### English
+
+1. Open **Hiddify** and click **Connect**. Leave it connected.
+2. Open a terminal **in this folder** and run:
+
+```bash
+bash install.sh
+```
+
+3. If it asks for your password, type it and press Enter.
+4. Wait until you see **Done**. You can close the terminal.
+
+That is all. Leave Hiddify open. The helper runs in the background and chooses the best server for Agent.
+
+If Agent breaks after you close and reopen Hiddify, run `bash install.sh` again.
+
+### فارسی
+
+1. **هیدیفای** را باز کنید و **Connect** بزنید. وصل بماند.
+2. در **همین پوشه** ترمینال باز کنید و این را بزنید:
+
+```bash
+bash install.sh
+```
+
+3. اگر رمز خواست، رمز سیستم را بزنید و Enter.
+4. تا پیام **Done** صبر کنید. بعد ترمینال را ببندید.
+
+تمام. هیدیفای را باز و وصل بگذارید. برنامه کمکی در پس‌زمینه بهترین سرور را برای Agent انتخاب می‌کند.
+
+اگر بعد از بستن و باز کردن هیدیفای، Agent خراب شد، دوباره `bash install.sh` را اجرا کنید.
 
 ---
 
@@ -17,107 +48,47 @@ Uses Hiddify’s Clash-compatible API. No extra Python deps (stdlib only).
 
 ### English
 
-Cursor’s **Agent** (and other long-lived AI streams) is not a normal short HTTP request. It opens a **long streaming connection** (SSE / chunked responses) to Cursor’s servers and keeps it open while the agent thinks, reads files, and streams tokens back.
+Cursor’s **Agent** is not a short webpage request. It keeps a **long stream** open to Cursor’s servers.
 
-Over a typical Hiddify / VPN setup that connection often fails in ways that look random:
+On many Hiddify setups that stream stalls, hangs, or dies even when browsing feels fine. Wrong node, mux/fragment/WARP, or round-robin hopping mid-stream are common causes.
 
-- Agent starts, then **stalls mid-stream** or disconnects with no clear error
-- Chat / Agent works for a few seconds, then hangs until you retry
-- Some subscription nodes feel fine in a browser speed test, but **kill Agent streams**
-- Switching nodes by hand is slow, and a “fast” node can still be a bad fit for Cursor
+This tool:
 
-Common causes when tunneling Cursor through Hiddify:
-
-| Cause | What happens to Agent |
-|-------|------------------------|
-| **Mux / TLS fragment / WARP** | Extra buffering or packet tricks break long streams |
-| **Large MTU / gVisor TUN stack** | Silent drops or stalled TCP over the tunnel |
-| **Messy DNS / fake-DNS / routing** | Unstable resolve path to `*.cursor.sh` |
-| **WebSocket / HTTP / gRPC / CDN transports** | Fine for browsing; bad for long SSE — they buffer or idle-timeout streams |
-| **A weak or overloaded node** | Latency spikes → Cursor API looks “dead” until you switch |
-
-So the real problem is not “VPN is slow.” It is: **Hiddify defaults + the wrong node transport are hostile to Cursor’s long Agent streams**, and there is no built-in loop that keeps re-picking a Cursor-friendly node when quality drops.
-
-This repo fixes that by:
-
-1. Applying a **Cursor-oriented Hiddify patch** (prefs/TUN that favor stable streams)
-2. Preferring **Reality + TCP** outbounds and **URL-testing against Cursor’s API**
-3. **Auto-failing over** when latency or failures get bad (`watch` mode / systemd)
+1. Optionally applies Cursor-friendly Hiddify settings
+2. Tests nodes against Cursor’s API (prefers Reality + TCP)
+3. Auto-switches when quality drops
 
 ### فارسی
 
-درخواست **Agent** در Cursor یک درخواست کوتاه معمولی نیست. یک **اتصال استریم طولانی** به سرورهای Cursor باز می‌کند و تا وقتی Agent کار می‌کند (فکر کردن، خواندن فایل، استریم توکن) این اتصال باز می‌ماند.
+درخواست **Agent** در Cursor یک درخواست کوتاه نیست؛ یک **استریم طولانی** است.
 
-روی خیلی از تنظیمات Hiddify / VPN این اتصال به شکل‌های آزاردهنده قطع می‌شود:
+روی خیلی از تنظیمات هیدیفای این استریم وسط کار می‌ایستد، حتی اگر مرورگر «خوب» باشد.
 
-- Agent شروع می‌شود، وسط کار **می‌ایستد** یا بدون خطای واضح قطع می‌شود
-- چند ثانیه کار می‌کند، بعد hang می‌شود تا دوباره Retry کنید
-- بعضی نودها در تست مرورگر «خوب» به‌نظر می‌رسند، ولی **استریم Agent را خراب می‌کنند**
-- عوض کردن دستی نود وقت‌گیر است و نود «سریع» لزوماً برای Cursor مناسب نیست
-
-دلایل رایج وقتی Cursor از تونل Hiddify رد می‌شود:
-
-| علت | اثر روی Agent |
-|-----|----------------|
-| **Mux / TLS fragment / WARP** | بافر اضافه یا دستکاری پکت، استریم طولانی را می‌شکند |
-| **MTU بزرگ / استک gVisor** | دراپ بی‌صدا یا گیر کردن TCP داخل تونل |
-| **DNS شلوغ / fake-DNS / routing پیچیده** | مسیر resolve به `*.cursor.sh` ناپایدار می‌شود |
-| **ترنسپورت‌های WS / HTTP / gRPC / CDN** | برای وب‌گردی اوکی‌اند؛ برای SSE طولانی بد — بافر یا idle-timeout |
-| **نود ضعیف یا شلوغ** | پرش latency → API کورسور «مرده» به‌نظر می‌رسد تا نود عوض شود |
-
-پس مشکل اصلی فقط «کند بودن VPN» نیست؛ مشکل این است که **تنظیمات پیش‌فرض Hiddify + نود/ترنسپورت نامناسب با استریم طولانی Agent سازگار نیست**، و حلقه‌ای برای انتخاب دوباره نود مناسب Cursor وقتی کیفیت افت می‌کند وجود ندارد.
-
-این ریپو همان را حل می‌کند:
-
-1. **پچ مخصوص Cursor** روی prefs/TUN در Hiddify (به نفع استریم پایدار)
-2. اولویت به نودهای **Reality + TCP** و **تست واقعی روی API کورسور**
-3. **failover خودکار** وقتی latency یا خطا زیاد شد (`watch` / systemd)
+این ابزار نود مناسب Cursor را انتخاب می‌کند و وقتی کیفیت افت کرد عوض می‌کند.
 
 ---
 
-## Requirements
+## Advanced / برای افراد فنی
 
-- Linux
-- Hiddify running (often as root) with Clash API enabled
-- `python3`, `sudo` (for root prefs / secret cache), `ss`, `systemctl` (optional)
-
-## Quick start
+Needs Linux, Hiddify running, `python3`, and `sudo` if Hiddify was started with sudo.
 
 ```bash
-cd ~/Tools/failover
-chmod +x bin/hiddify-cursor-failover install.sh
-
-# one-time: cache Clash API secret from root Hiddify config
 ./bin/hiddify-cursor-failover refresh-secret
-
-# patch Hiddify prefs/TUN for Cursor (needs sudo if Hiddify runs as root)
 ./bin/hiddify-cursor-failover patch
-
-# reconnect Hiddify once so prefs rebuild the core config, then:
 ./bin/hiddify-cursor-failover once
-
-# continuous monitor
 ./bin/hiddify-cursor-failover watch
 ```
 
-`once` / `watch` run **patch first** by default, then URL-test nodes.
+Flags: `--skip-patch`, `--all-nodes`, `--group select`, `--test-url https://api2.cursor.sh/`
 
-### systemd user service
+Hiddify data dirs:
 
-```bash
-./install.sh
-./bin/hiddify-cursor-failover refresh-secret
-./bin/hiddify-cursor-failover patch   # do this in a terminal (sudo)
-systemctl --user enable --now hiddify-cursor-failover.service
-```
+- Root (`sudo hiddify`): `/root/.local/share/app.hiddify.com/`
+- User / older: `~/.local/share/hiddify/` or `~/.local/share/app.hiddify.com/`
 
-Keep **Hiddify running**. This service only talks to its API; it does not replace Hiddify.
+Cached API secret (do not commit): `~/.config/hiddify-cursor/clash_secret`
 
-After `patch`, reconnect Hiddify (or restart it) so MTU/TUN prefs apply to a freshly built config.
-
-## What `patch` changes
-
-Writes Cursor-friendly Flutter prefs (root + user `shared_preferences.json` when reachable):
+### What `patch` changes
 
 | Key | Value | Why |
 |-----|-------|-----|
@@ -138,69 +109,17 @@ Writes Cursor-friendly Flutter prefs (root + user `shared_preferences.json` when
 | `flutter.enable-dns-routing` | `false` | keep routing simple |
 | `flutter.resolve-destination` | `false` | leave resolve to tunnel |
 
-Hiddify has **no** “agent long connection” switch. After a **full quit + start**, check **Config Options**:
+Hiddify has no “agent long connection” switch. Patch while the app is **quit** if you want Config Options to show these values.
 
-- Inbound: TUN implementation = `system`, MTU = `1400`
-- TLS tricks / mux / WARP: off
-- Routing: balancer strategy = **Sticky sessions** (not Round robin)
-- Proxies: a **single node** selected, not `Load Balance` / `balance`
+### How failover picks a node
 
-Patching while Hiddify is still running is overwritten on save. Quit the app, run `patch`, then start Hiddify and connect.
+1. Skip subscription banner rows
+2. Prefer Reality + TCP (skip ws / http / grpc / CDN transports)
+3. URL-test `https://api2.cursor.sh/`
+4. Select the lowest-latency working node
+5. In watch mode, switch after bad latency or repeated failures
 
-Also patches live `current-config.json` TUN `mtu`/`stack` and balancer strategy when writable, and classifies **Reality TCP** outbounds as preferred for failover.
-
-## How failover picks a node
-
-1. Skip subscription banner rows (`User:`, `Used:`, …)
-2. Prefer **Reality + TCP** outbounds (skip `ws` / `http` / `xhttp` / `grpc` / CDN-style transports that buffer SSE)
-3. URL-test against `https://api2.cursor.sh/`
-4. Select the lowest-latency working node in the `select` group
-5. In `watch` mode: recheck on an interval; switch after bad latency or repeated failures
-
-Use `--all-nodes` to disable the Reality TCP preference. Use `--skip-patch` to only run selection.
-
-## Config / secrets
-
-| Path | Purpose |
-|------|---------|
-| `~/.config/hiddify-cursor/clash_secret` | Cached API secret (mode 600) |
-| `~/.config/hiddify-cursor/clash_port` | Cached Clash API port |
-
-Hiddify data dirs (tool checks both):
-
-- Root (when started with `sudo hiddify`): `/root/.local/share/app.hiddify.com/`
-- Legacy / user: `~/.local/share/hiddify/` or `~/.local/share/app.hiddify.com/`
-
-Do **not** commit these files. Re-run `refresh-secret` after Hiddify restarts if the secret rotates.
-
-## CLI
-
-```text
-./bin/hiddify-cursor-failover refresh-secret
-./bin/hiddify-cursor-failover patch
-./bin/hiddify-cursor-failover once
-./bin/hiddify-cursor-failover watch --interval 20 --bad-ms 1500 --fail-threshold 2
-```
-
-Useful flags:
-
-- `--skip-patch` — selection only
-- `--all-nodes` — do not restrict to Reality TCP
-- `--group select`
-- `--test-url https://api2.cursor.sh/`
-- `--api http://127.0.0.1:16757`
-
-## Layout
-
-```text
-failover/
-  hiddify_cursor_failover.py   # Clash API + once/watch
-  hiddify_cursor_patch.py      # Hiddify prefs / TUN patch
-  bin/hiddify-cursor-failover  # CLI wrapper
-  systemd/…service
-  install.sh
-  README.md
-```
+---
 
 ## License
 
