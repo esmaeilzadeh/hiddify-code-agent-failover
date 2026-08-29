@@ -128,6 +128,8 @@ Writes Cursor-friendly Flutter prefs (root + user `shared_preferences.json` when
 | `flutter.enable-mux` | `false` | mux breaks long streams |
 | `flutter.enable-tls-fragment` | `false` | fragmenting hurts Agent |
 | `flutter.enable-warp` | `false` | extra hop / buffering |
+| `flutter.balancer-strategy` | `sticky-sessions` | stop round-robin mid-stream |
+| `flutter.connection-test-url` | `https://api2.cursor.sh/` | delay tests match Cursor |
 | `flutter.remote-dns-domain-strategy` | `ipv4_only` | stable DNS to Cursor |
 | `flutter.direct-dns-domain-strategy` | `ipv4_only` | same |
 | `flutter.remote-dns-address` | `1.1.1.1` | predictable remote resolver |
@@ -136,7 +138,16 @@ Writes Cursor-friendly Flutter prefs (root + user `shared_preferences.json` when
 | `flutter.enable-dns-routing` | `false` | keep routing simple |
 | `flutter.resolve-destination` | `false` | leave resolve to tunnel |
 
-Also patches live `current-config.json` TUN `mtu`/`stack` when writable, and classifies **Reality TCP** outbounds as preferred for failover.
+Hiddify has **no** “agent long connection” switch. After a **full quit + start**, check **Config Options**:
+
+- Inbound: TUN implementation = `system`, MTU = `1400`
+- TLS tricks / mux / WARP: off
+- Routing: balancer strategy = **Sticky sessions** (not Round robin)
+- Proxies: a **single node** selected, not `Load Balance` / `balance`
+
+Patching while Hiddify is still running is overwritten on save. Quit the app, run `patch`, then start Hiddify and connect.
+
+Also patches live `current-config.json` TUN `mtu`/`stack` and balancer strategy when writable, and classifies **Reality TCP** outbounds as preferred for failover.
 
 ## How failover picks a node
 
@@ -154,6 +165,11 @@ Use `--all-nodes` to disable the Reality TCP preference. Use `--skip-patch` to o
 |------|---------|
 | `~/.config/hiddify-cursor/clash_secret` | Cached API secret (mode 600) |
 | `~/.config/hiddify-cursor/clash_port` | Cached Clash API port |
+
+Hiddify data dirs (tool checks both):
+
+- Root (when started with `sudo hiddify`): `/root/.local/share/app.hiddify.com/`
+- Legacy / user: `~/.local/share/hiddify/` or `~/.local/share/app.hiddify.com/`
 
 Do **not** commit these files. Re-run `refresh-secret` after Hiddify restarts if the secret rotates.
 

@@ -37,6 +37,10 @@ CURSOR_PREFS: dict[str, Any] = {
     # Stable public resolvers for remote DNS (Cursor / CDN names).
     "flutter.remote-dns-address": "1.1.1.1",
     "flutter.direct-dns-address": "1.1.1.1",
+    # Hiddify UI "Balancer strategy" defaults to round-robin; that hops nodes
+    # mid-stream and kills Cursor Agent. Sticky keeps one node per session.
+    "flutter.balancer-strategy": "sticky-sessions",
+    "flutter.connection-test-url": "https://api2.cursor.sh/",
 }
 
 BAD_TRANSPORTS = {"ws", "websocket", "http", "httpupgrade", "h2", "grpc", "xhttp"}
@@ -67,27 +71,61 @@ def log(msg: str) -> None:
     print(f"[{ts}] {msg}", flush=True)
 
 
-def _default_pref_paths() -> list[Path]:
-    paths = [
-        Path("/root/.local/share/hiddify/shared_preferences.json"),
-        Path(os.path.expanduser("~/.local/share/hiddify/shared_preferences.json")),
-    ]
-    # Dedupe while preserving order.
-    out: list[Path] = []
+# Hiddify ≥2.x (sudo / root) stores data under app.hiddify.com; older builds use hiddify/.
+_HIDDIFY_DATA_BASES = (
+    "app.hiddify.com",
+    "hiddify",
+)
+
+
+def _data_dir_for_home(home: str, package: str) -> Path:
+    return Path(home) / ".local" / "share" / package
+
+
+def _pref_path_for_data_dir(data_dir: Path) -> Path:
+    return data_dir / "shared_preferences.json"
+
+
+def _config_path_for_data_dir(data_dir: Path) -> Path:
+    return data_dir / "data" / "current-config.json"
+
+
+def pref_path_candidates() -> list[Path]:
+    """Hiddify shared_preferences paths, root first when reachable."""
+    homes = ["/root", os.path.expanduser("~")]
+    paths: list[Path] = []
     seen: set[str] = set()
-    for p in paths:
-        key = str(p)
-        if key not in seen:
-            out.append(p)
-            seen.add(key)
-    return out
+    for home in homes:
+        for package in _HIDDIFY_DATA_BASES:
+            path = _pref_path_for_data_dir(_data_dir_for_home(home, package))
+            key = str(path)
+            if key not in seen:
+                paths.append(path)
+                seen.add(key)
+    return paths
+
+
+def config_path_candidates() -> list[Path]:
+    """Hiddify current-config.json paths, root first when reachable."""
+    homes = ["/root", os.path.expanduser("~")]
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for home in homes:
+        for package in _HIDDIFY_DATA_BASES:
+            path = _config_path_for_data_dir(_data_dir_for_home(home, package))
+            key = str(path)
+            if key not in seen:
+                paths.append(path)
+                seen.add(key)
+    return paths
+
+
+def _default_pref_paths() -> list[Path]:
+    return pref_path_candidates()
 
 
 def _default_config_paths() -> list[Path]:
-    return [
-        Path("/root/.local/share/hiddify/data/current-config.json"),
-        Path(os.path.expanduser("~/.local/share/hiddify/data/current-config.json")),
-    ]
+    return config_path_candidates()
 
 
 def _sudo_allowed_interactive() -> bool:
@@ -218,6 +256,26 @@ def patch_live_tun(config: dict) -> list[str]:
         if ib.get("stack") != "system":
             changes.append(f"tun.stack: {ib.get('stack')!r} -> system")
             ib["stack"] = "system"
+    for ob in config.get("outbounds") or []:
+        tag = ob.get("tag")
+        otype = ob.get("type")
+        if tag == "balance" or otype in {"balancer", "loadbalance"}:
+            # Hiddify / Clash-style configs use hyphenated names.
+            sticky = "sticky-sessions"
+            already = {sticky, "sticky_sessions"}
+            strategy = ob.get("strategy")
+            if isinstance(strategy, dict):
+                old = strategy.get("type")
+                if old not in already:
+                    strategy["type"] = sticky
+                    changes.append(f"{tag or otype}.strategy: {old!r} -> {sticky}")
+            elif strategy not in already:
+                changes.append(f"{tag or otype}.strategy: {strategy!r} -> {sticky}")
+                ob["strategy"] = sticky
+        if tag == "select" and otype == "selector":
+            if not ob.get("interrupt_exist_connections"):
+                ob["interrupt_exist_connections"] = True
+                changes.append("select.interrupt_exist_connections -> True")
     return changes
 
 def _path_is_usable(path: Path) -> bool:
@@ -294,7 +352,9 @@ def patch_hiddify(
 
     if prefs_changed or live_changed:
         notes.append(
-            "Reconnect Hiddify (disconnect/connect or restart) so prefs fully rebuild the core config."
+            "Fully quit Hiddify (do not only disconnect), then start it again so "
+            "Config Options reload: MTU 1400, TUN=system, mux/fragment/WARP off, "
+            "balancer=sticky-sessions. Then connect. Proxies must show a node, not Load Balance."
         )
 
     return PatchResult(
@@ -316,7 +376,9 @@ def load_preferred_nodes(config_path: Optional[str] = None) -> list[str]:
     if config_path:
         paths = [Path(config_path)]
     else:
-        paths = [Path("/root/.local/share/hiddify/data/current-config.json")]
+        paths = [
+            p for p in config_path_candidates() if str(p).startswith("/root/")
+        ]
     for path in paths:
         try:
             cfg = _read_json(path)

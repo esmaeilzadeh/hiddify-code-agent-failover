@@ -30,12 +30,9 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
-from hiddify_cursor_patch import load_preferred_nodes, patch_hiddify
+from hiddify_cursor_patch import config_path_candidates, load_preferred_nodes, patch_hiddify
 
-DEFAULT_CONFIG_CANDIDATES = (
-    "/root/.local/share/hiddify/data/current-config.json",
-    os.path.expanduser("~/.local/share/hiddify/data/current-config.json"),
-)
+DEFAULT_CONFIG_CANDIDATES = tuple(str(p) for p in config_path_candidates())
 
 CACHE_DIR_NAME = "hiddify-cursor"
 DEFAULT_TEST_URL = "https://api2.cursor.sh/"
@@ -126,13 +123,14 @@ def cache_dir() -> str:
 
 
 def load_json_file(path: str, use_sudo: bool) -> dict:
+    noninteractive = os.environ.get("HIDDIFY_PATCH_NONINTERACTIVE") == "1"
     if use_sudo or (path.startswith("/root/") and not os.access(path, os.R_OK)):
         proc = subprocess.run(
             ["sudo", "-n", "cat", path],
             capture_output=True,
             text=True,
         )
-        if proc.returncode != 0:
+        if proc.returncode != 0 and not noninteractive:
             proc = subprocess.run(
                 ["sudo", "cat", path],
                 capture_output=True,
@@ -147,99 +145,121 @@ def load_json_file(path: str, use_sudo: bool) -> dict:
         return json.load(f)
 
 
+def _secret_candidates(
+    secret: Optional[str],
+    config_path: Optional[str],
+    include_configs: bool = False,
+) -> list[tuple[str, str, Optional[int]]]:
+    """(source, secret, optional_port). Config files are optional to avoid sudo -n spam."""
+    out: list[tuple[str, str, Optional[int]]] = []
+    seen: set[str] = set()
+
+    def add(source: str, value: Optional[str], port: Optional[int] = None) -> None:
+        if not value or value in seen:
+            return
+        seen.add(value)
+        out.append((source, value, port))
+
+    add("arg", secret)
+    add("env", os.environ.get("HIDDIFY_CLASH_SECRET"))
+
+    conf = cache_dir()
+    cached_port = None
+    try:
+        cached_port = int(open(os.path.join(conf, "clash_port"), encoding="utf-8").read().strip())
+    except (OSError, ValueError):
+        cached_port = None
+    try:
+        cached = open(os.path.join(conf, "clash_secret"), encoding="utf-8").read().strip()
+    except OSError:
+        cached = ""
+    add("cache", cached or None, cached_port)
+
+    if not include_configs:
+        return out
+
+    candidates: list[str] = []
+    if config_path:
+        candidates.append(config_path)
+    candidates.extend(DEFAULT_CONFIG_CANDIDATES)
+    for path in candidates:
+        try:
+            cfg = load_json_file(path, use_sudo=path.startswith("/root/"))
+        except Exception:
+            continue
+        api = (cfg.get("experimental") or {}).get("clash_api") or {}
+        cfg_secret = api.get("secret")
+        port = None
+        controller = api.get("external_controller") or ""
+        if ":" in controller:
+            try:
+                port = int(controller.rsplit(":", 1)[-1])
+            except ValueError:
+                port = None
+        add(path, cfg_secret, port)
+    return out
+
+
 def discover_api(
     secret: Optional[str],
     base: Optional[str],
     config_path: Optional[str],
 ) -> ClashApi:
-    cfg_secret = None
-    cfg_port = None
-    secret_source = "arg"
+    last_err: Optional[Exception] = None
+    for include_configs in (False, True):
+        secrets = _secret_candidates(secret, config_path, include_configs=include_configs)
+        if not secrets:
+            continue
+        api, err = _try_secrets(secrets, base)
+        if api:
+            return api
+        last_err = err
+    raise SystemExit(
+        f"Could not reach Clash API. Last error: {last_err}\n"
+        "If Hiddify was restarted, run: ./bin/hiddify-cursor-failover refresh-secret"
+    )
 
-    conf = cache_dir()
-    cached_secret_file = os.path.join(conf, "clash_secret")
-    cached_port_file = os.path.join(conf, "clash_port")
-    cached_secret = None
-    cached_port = None
-    if os.path.isfile(cached_secret_file):
-        try:
-            cached_secret = open(cached_secret_file, encoding="utf-8").read().strip() or None
-        except OSError:
-            cached_secret = None
-    if os.path.isfile(cached_port_file):
-        try:
-            cached_port = int(open(cached_port_file, encoding="utf-8").read().strip())
-        except (OSError, ValueError):
-            cached_port = None
 
-    if secret:
-        secret_source = "arg"
-    elif os.environ.get("HIDDIFY_CLASH_SECRET"):
-        secret = os.environ["HIDDIFY_CLASH_SECRET"]
-        secret_source = "env"
-    elif cached_secret:
-        secret = cached_secret
-        secret_source = "cache"
-
-    if not secret or (not base and not os.environ.get("HIDDIFY_CLASH_API") and cached_port is None):
-        candidates: list[str] = []
-        if config_path:
-            candidates.append(config_path)
-        candidates.extend(DEFAULT_CONFIG_CANDIDATES)
-        for path in candidates:
-            try:
-                cfg = load_json_file(path, use_sudo=path.startswith("/root/"))
-            except Exception as e:
-                log(f"skip config {path}: {e}")
-                continue
-            api = (cfg.get("experimental") or {}).get("clash_api") or {}
-            if api.get("secret"):
-                cfg_secret = api["secret"]
-                controller = api.get("external_controller") or "127.0.0.1:16756"
-                if ":" in controller:
-                    cfg_port = int(controller.rsplit(":", 1)[-1])
-                if not secret:
-                    secret = cfg_secret
-                    secret_source = path
-                break
-
-    if not secret:
-        raise SystemExit(
-            "No Clash API secret.\n"
-            "Run once:  ./bin/hiddify-cursor-failover refresh-secret\n"
-            "Or export HIDDIFY_CLASH_SECRET / allow sudo to read "
-            "/root/.local/share/hiddify/data/current-config.json"
-        )
-
+def _try_secrets(
+    secrets: list[tuple[str, str, Optional[int]]],
+    base: Optional[str],
+) -> tuple[Optional[ClashApi], Optional[Exception]]:
     if base:
         bases = [base.rstrip("/")]
     elif os.environ.get("HIDDIFY_CLASH_API"):
         bases = [os.environ["HIDDIFY_CLASH_API"].rstrip("/")]
     else:
-        ports = []
-        if cached_port:
-            ports.append(cached_port)
-        if cfg_port:
-            ports.append(cfg_port)
-        for p in (16757, 16756, 9090):
-            if p not in ports:
-                ports.append(p)
-        bases = [f"http://127.0.0.1:{p}" for p in ports]
-
+        bases = []
     last_err: Optional[Exception] = None
-    for b in bases:
-        api = ClashApi(base=b, secret=secret)
-        try:
-            ver = api.version()
-            log(
-                f"Clash API ok at {b} (secret from {secret_source}); "
-                f"version={ver.get('version') or ver}"
-            )
-            return api
-        except Exception as e:
-            last_err = e
-            continue
-    raise SystemExit(f"Could not reach Clash API. Last error: {last_err}")
+    extra_ports = [16757, 16756, 9090]
+    for source, tok, port in secrets:
+        try_bases = list(bases)
+        if not try_bases:
+            ports: list[int] = []
+            if port:
+                ports.append(port)
+            for p in extra_ports:
+                if p not in ports:
+                    ports.append(p)
+            try_bases = [f"http://127.0.0.1:{p}" for p in ports]
+        for b in try_bases:
+            api = ClashApi(base=b, secret=tok)
+            try:
+                ver = api.version()
+                log(
+                    f"Clash API ok at {b} (secret from {source}); "
+                    f"version={ver.get('version') or ver}"
+                )
+                return api, None
+            except Exception as e:
+                last_err = e
+                continue
+    return None, last_err
+
+
+def _is_clash_auth_error(exc: BaseException) -> bool:
+    text = str(exc)
+    return "401" in text or "Unauthorized" in text
 
 
 def is_real_server(name: str) -> bool:
@@ -402,10 +422,13 @@ def cmd_once(args: argparse.Namespace) -> int:
 
 def cmd_watch(args: argparse.Namespace) -> int:
     preferred = maybe_patch(args)
-    api = discover_api(args.secret, args.api, args.config)
     fail_streak = 0
     last_switch = 0.0
 
+    def connect() -> ClashApi:
+        return discover_api(args.secret, args.api, args.config)
+
+    api = connect()
     pick_and_select(
         api,
         args.group,
@@ -417,7 +440,18 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     while True:
         time.sleep(args.interval)
-        name, delay = measure_current(api, args.group, args.test_url, args.timeout_ms)
+        try:
+            name, delay = measure_current(api, args.group, args.test_url, args.timeout_ms)
+        except (RuntimeError, SystemExit) as e:
+            if _is_clash_auth_error(e):
+                log("Clash API unauthorized (Hiddify likely restarted). Reconnecting…")
+                try:
+                    api = connect()
+                except SystemExit as e2:
+                    log(str(e2))
+                    log("Run: ./bin/hiddify-cursor-failover refresh-secret")
+                continue
+            raise
         if delay is None:
             fail_streak += 1
             log(f"Current {name!r} unhealthy ({fail_streak}/{args.fail_threshold})")
@@ -454,18 +488,19 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--api", help="Clash API base, e.g. http://127.0.0.1:16757")
-    p.add_argument("--secret", help="Clash API secret (else env / root config via sudo)")
-    p.add_argument("--config", help="Path to Hiddify current-config.json")
-    p.add_argument("--group", default="select", help="Selector group tag (default: select)")
-    p.add_argument("--test-url", default=DEFAULT_TEST_URL, help="URL used for delay tests")
-    p.add_argument("--timeout-ms", type=int, default=5000, help="Per-node delay test timeout")
-    p.add_argument(
+    selection = argparse.ArgumentParser(add_help=False)
+    selection.add_argument("--api", help="Clash API base, e.g. http://127.0.0.1:16757")
+    selection.add_argument("--secret", help="Clash API secret (else env / root config via sudo)")
+    selection.add_argument("--config", help="Path to Hiddify current-config.json")
+    selection.add_argument("--group", default="select", help="Selector group tag (default: select)")
+    selection.add_argument("--test-url", default=DEFAULT_TEST_URL, help="URL used for delay tests")
+    selection.add_argument("--timeout-ms", type=int, default=5000, help="Per-node delay test timeout")
+    selection.add_argument(
         "--skip-patch",
         action="store_true",
         help="Do not patch Hiddify prefs/TUN before selecting nodes",
     )
-    p.add_argument(
+    selection.add_argument(
         "--all-nodes",
         action="store_true",
         help="URL-test all subscription nodes (not only Reality TCP)",
@@ -475,10 +510,20 @@ def build_parser() -> argparse.ArgumentParser:
     patch = sub.add_parser("patch", help="Only patch Hiddify prefs/TUN for Cursor")
     patch.set_defaults(func=cmd_patch)
 
-    once = sub.add_parser("once", help="Patch (unless --skip-patch), then select best node")
+    once = sub.add_parser(
+        "once",
+        parents=[selection],
+        help="Patch (unless --skip-patch), then select best node",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     once.set_defaults(func=cmd_once)
 
-    watch = sub.add_parser("watch", help="Patch, select best node, then auto-failover")
+    watch = sub.add_parser(
+        "watch",
+        parents=[selection],
+        help="Patch, select best node, then auto-failover",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     watch.add_argument("--interval", type=float, default=20.0, help="Seconds between health checks")
     watch.add_argument("--bad-ms", type=int, default=1500, help="Latency above this triggers switch")
     watch.add_argument(

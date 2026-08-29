@@ -18,7 +18,7 @@ After=network-online.target
 Type=simple
 Environment=HIDDIFY_PATCH_NONINTERACTIVE=1
 # Run: $BIN patch   (sudo once), then reconnect Hiddify.
-ExecStart=$BIN --skip-patch watch --interval 20 --bad-ms 1500 --fail-threshold 2
+ExecStart=$BIN watch --skip-patch --interval 20 --bad-ms 1500 --fail-threshold 2
 Restart=on-failure
 RestartSec=5
 

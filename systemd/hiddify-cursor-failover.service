@@ -6,7 +6,7 @@ After=network-online.target
 Type=simple
 Environment=HIDDIFY_PATCH_NONINTERACTIVE=1
 # Run `./bin/hiddify-cursor-failover patch` once in a terminal (sudo), then reconnect Hiddify.
-ExecStart=/home/mohamad/Tools/failover/bin/hiddify-cursor-failover --skip-patch watch --interval 20 --bad-ms 1500 --fail-threshold 2
+ExecStart=/home/mohammadesmailzade/Tools/hiddify-code-agent-failover/bin/hiddify-cursor-failover watch --skip-patch --interval 20 --bad-ms 1500 --fail-threshold 2
 Restart=on-failure
 RestartSec=5
 

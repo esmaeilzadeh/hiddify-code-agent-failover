@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Cache root Hiddify Clash secret once, then run the failover tool.
+# Cache Hiddify Clash secret once, then run the failover tool.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT_DIR/hiddify_cursor_failover.py"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hiddify-cursor"
 SECRET_FILE="$CONF_DIR/clash_secret"
-ROOT_CFG="${HIDDIFY_ROOT_CONFIG:-/root/.local/share/hiddify/data/current-config.json}"
+PORT_FILE="$CONF_DIR/clash_port"
 
 export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 cd "$ROOT_DIR"
@@ -14,24 +14,131 @@ cd "$ROOT_DIR"
 mkdir -p "$CONF_DIR"
 chmod 700 "$CONF_DIR"
 
-refresh_secret() {
-  echo "Reading Clash API secret from root Hiddify config (sudo)…"
-  local secret port controller
-  secret="$(sudo python3 -c "import json;print(json.load(open('$ROOT_CFG'))['experimental']['clash_api']['secret'])")"
-  controller="$(sudo python3 -c "import json;print(json.load(open('$ROOT_CFG'))['experimental']['clash_api'].get('external_controller','127.0.0.1:16756'))")"
-  port="${controller##*:}"
-  # Live listener may differ from config (observed: config 16756, live 16757).
+_read_clash_api() {
+  local cfg="$1"
+  python3 - "$cfg" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    api = json.load(f).get("experimental", {}).get("clash_api") or {}
+secret = api.get("secret")
+controller = api.get("external_controller") or "127.0.0.1:16756"
+if not secret:
+    raise SystemExit("missing secret")
+print(secret)
+print(controller)
+PY
+}
+
+_detect_live_port() {
+  local port="$1"
   if ss -ltn | awk '{print $4}' | grep -qE ":16757$"; then
-    port=16757
+    echo 16757
   elif ss -ltn | awk '{print $4}' | grep -qE ":${port}$"; then
-    :
+    echo "$port"
   elif ss -ltn | awk '{print $4}' | grep -qE ":16756$"; then
-    port=16756
+    echo 16756
+  else
+    echo "$port"
+  fi
+}
+
+_hiddify_runs_as_root() {
+  pgrep -u root -x hiddify >/dev/null 2>&1
+}
+
+_verify_clash_secret() {
+  local secret="$1" port="$2"
+  python3 - "$secret" "$port" <<'PY'
+import sys, urllib.request, urllib.error
+secret, port = sys.argv[1], sys.argv[2]
+req = urllib.request.Request(
+    f"http://127.0.0.1:{port}/version",
+    headers={"Authorization": f"Bearer {secret}"},
+)
+try:
+    with urllib.request.urlopen(req, timeout=3) as resp:
+        sys.exit(0 if 200 <= resp.status < 300 else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+_cache_secret() {
+  local source="$1" secret="$2" controller="$3"
+  local port="${controller##*:}"
+  port="$(_detect_live_port "$port")"
+  if ! _verify_clash_secret "$secret" "$port"; then
+    echo "Secret from $source does not authenticate to Clash API on port $port" >&2
+    return 1
   fi
   umask 077
   printf '%s\n' "$secret" >"$SECRET_FILE"
-  printf '%s\n' "$port" >"$CONF_DIR/clash_port"
+  printf '%s\n' "$port" >"$PORT_FILE"
   echo "Cached secret -> $SECRET_FILE (port $port)"
+}
+
+refresh_secret() {
+  local candidates=()
+  if [[ -n "${HIDDIFY_ROOT_CONFIG:-}" ]]; then
+    candidates+=("$HIDDIFY_ROOT_CONFIG")
+  fi
+  while IFS= read -r path; do
+    candidates+=("$path")
+  done < <(
+    python3 - <<'PY'
+from hiddify_cursor_patch import config_path_candidates
+for path in config_path_candidates():
+    print(path)
+PY
+  )
+
+  local cfg secret port controller
+  for cfg in "${candidates[@]}"; do
+    if [[ "$cfg" == /root/* ]]; then
+      if { read -r secret && read -r controller; } < <(
+        sudo python3 - "$cfg" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    api = json.load(f).get("experimental", {}).get("clash_api") or {}
+secret = api.get("secret")
+controller = api.get("external_controller") or "127.0.0.1:16756"
+if not secret:
+    raise SystemExit("missing secret")
+print(secret)
+print(controller)
+PY
+      2>/dev/null); then
+        echo "Using Clash API secret from $cfg (sudo)"
+        if _cache_secret "$cfg" "$secret" "$controller"; then
+          return 0
+        fi
+      fi
+      continue
+    fi
+    if _hiddify_runs_as_root; then
+      echo "Skipping $cfg (Hiddify is running as root; user-home secret would 401)" >&2
+      continue
+    fi
+    [[ -f "$cfg" ]] || continue
+    if { read -r secret && read -r controller; } < <(_read_clash_api "$cfg" 2>/dev/null); then
+      echo "Using Clash API secret from $cfg"
+      if _cache_secret "$cfg" "$secret" "$controller"; then
+        return 0
+      fi
+    fi
+  done
+
+  echo "Could not read a working Clash API secret from any Hiddify config." >&2
+  echo "Tried: ${candidates[*]}" >&2
+  if _hiddify_runs_as_root; then
+    echo "Hiddify is running as root. Re-run in a terminal with sudo:" >&2
+    echo "  ./bin/hiddify-cursor-failover refresh-secret" >&2
+  else
+    echo "Start Hiddify, then: ./bin/hiddify-cursor-failover refresh-secret" >&2
+  fi
+  return 1
 }
 
 cmd="${1:-}"
@@ -46,7 +153,7 @@ fi
 
 export HIDDIFY_CLASH_SECRET
 HIDDIFY_CLASH_SECRET="$(cat "$SECRET_FILE")"
-port="$(cat "$CONF_DIR/clash_port" 2>/dev/null || echo 16757)"
+port="$(cat "$PORT_FILE" 2>/dev/null || echo 16757)"
 export HIDDIFY_CLASH_API="http://127.0.0.1:${port}"
 
-exec python3 "$SCRIPT" --api "$HIDDIFY_CLASH_API" "$@"
+exec python3 "$SCRIPT" "$@"
