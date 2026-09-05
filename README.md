@@ -4,6 +4,8 @@
   <img src="logo.png" alt="Hiddify Cursor Failover" width="280">
 </p>
 
+**Hiddify + Cursor Agent** helper for Linux: stabilize long Agent streams over Hiddify VPN (TUN), auto-failover Reality/TCP nodes, and **bypass LAN / corp IPs & DNS** so local names stay DIRECT off the tunnel.
+
 > ### Bypass LAN / corp IPs & DNS in Hiddify **TUN** mode
 >
 > Hiddify rebuilds `current-config.json` on every Connect, so live JSON patches alone do not stick. This project writes durable excludes into Hiddify prefs + `route_rule.proto` (and curl-safe `NO_PROXY`) from `.env` — so chosen IPs and names stay **DIRECT** off the VPN after reconnect.
@@ -16,7 +18,7 @@
 >
 > **فارسی:** در حالت TUN، فقط پچ کردن JSON زنده کافی نیست (با Connect پاک می‌شود). این ابزار excludeها را در prefs و `route_rule.proto` می‌نویسد تا IP و DNS انتخابی روی VPN نروند. `.env` را بسازید، `bypass --apply` بزنید، هیدیفای را قطع/وصل کنید.
 
-Keeps **Cursor Agent** stable over **Hiddify** on Linux: it picks a good server and switches automatically when the connection gets bad.
+Topics people search for: `hiddify`, `cursor`, `cursor-ai`, `vpn`, `tun`, `sing-box`, `linux`, `failover`, `bypass`, `no-proxy`.
 
 ---
 

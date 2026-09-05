@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Apply GitHub About description + topics (requires: gh auth login).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DESC='Linux helper: stabilize Cursor Agent over Hiddify TUN — failover + bypass LAN/corp IPs & DNS'
+
+gh repo edit esmaeilzadeh/hiddify-code-agent-failover \
+  --description "$DESC" \
+  --add-topic hiddify \
+  --add-topic cursor \
+  --add-topic cursor-ai \
+  --add-topic vpn \
+  --add-topic tun \
+  --add-topic sing-box \
+  --add-topic linux \
+  --add-topic failover \
+  --add-topic bypass \
+  --add-topic no-proxy
+
+echo "Updated About description and topics."
+gh repo view esmaeilzadeh/hiddify-code-agent-failover --json description,repositoryTopics
