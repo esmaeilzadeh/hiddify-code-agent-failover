@@ -20,6 +20,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from hiddify_bypass import (
+    BypassSpec,
+    apply_bypass_to_config,
+    apply_system_no_proxy,
+    discover_direct_dns,
+    load_bypass_spec,
+)
+from hiddify_route_rules import (
+    _merge_managed,
+    build_route_rule,
+    bypass_prefs_overlay,
+    route_rule_path_candidates,
+)
+
 # Flutter prefs Hiddify reads when building the sing-box config.
 CURSOR_PREFS: dict[str, Any] = {
     "flutter.service-mode": "vpn",
@@ -33,7 +47,9 @@ CURSOR_PREFS: dict[str, Any] = {
     "flutter.remote-dns-domain-strategy": "ipv4_only",
     "flutter.direct-dns-domain-strategy": "ipv4_only",
     "flutter.enable-fake-dns": False,
-    "flutter.enable-dns-routing": False,
+    # Region rules (geosite-ir → dns-direct). Office DNS for dns-direct is set
+    # by apply_hiddify_native_bypass when HIDDIFY_DIRECT_DNS / LAN resolvers exist.
+    "flutter.enable-dns-routing": True,
     # Stable public resolvers for remote DNS (Cursor / CDN names).
     "flutter.remote-dns-address": "1.1.1.1",
     "flutter.direct-dns-address": "1.1.1.1",
@@ -201,6 +217,104 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(payload, encoding="utf-8")
 
 
+def _write_bytes(path: Path, payload: bytes) -> None:
+    needs_sudo = path.as_posix().startswith("/root/") and (
+        not os.access(path, os.W_OK) if path.exists() else not os.access(path.parent, os.W_OK)
+    )
+    if needs_sudo or (path.as_posix().startswith("/root/") and not os.access(str(path.parent), os.W_OK)):
+        if not _sudo_allowed_interactive():
+            proc = subprocess.run(
+                ["sudo", "-n", "tee", str(path)],
+                input=payload,
+                capture_output=True,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    "Cannot write root Hiddify route_rule.proto without passwordless sudo. "
+                    "Run bypass --apply once in a terminal."
+                )
+            return
+        proc = subprocess.run(
+            ["sudo", "tee", str(path)],
+            input=payload,
+            capture_output=True,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.decode(errors="replace").strip() or "sudo tee failed")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+
+
+def _read_bytes(path: Path) -> bytes:
+    if path.as_posix().startswith("/root/") and not os.access(path, os.R_OK):
+        proc = subprocess.run(
+            ["sudo", "-n", "cat", str(path)],
+            capture_output=True,
+        )
+        if proc.returncode != 0 and _sudo_allowed_interactive():
+            proc = subprocess.run(["sudo", "cat", str(path)], capture_output=True)
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.decode(errors="replace").strip() or "sudo cat failed")
+        return proc.stdout
+    return path.read_bytes()
+
+
+def apply_hiddify_native_bypass(spec: BypassSpec) -> list[str]:
+    """Teach Hiddify prefs + route_rule.proto so Connect regenerates excludes."""
+    notes: list[str] = []
+    lan = discover_direct_dns()
+    overlay = bypass_prefs_overlay(spec, lan)
+    for path in pref_path_candidates():
+        if not _path_is_usable(path):
+            continue
+        try:
+            changed, detail = apply_prefs(path, overlay)
+        except Exception as e:
+            notes.append(f"skip prefs {path}: {e}")
+            continue
+        if changed:
+            log(f"Patched Hiddify prefs for durable bypass: {path}")
+            for line in detail:
+                log(f"  {line}")
+            notes.append(f"prefs bypass overlay -> {path}")
+
+    import route_rule_pb2 as rr
+
+    managed = build_route_rule(spec, lan)
+    for path in route_rule_path_candidates():
+        try:
+            existing = rr.RouteRule()
+            try:
+                existing.ParseFromString(_read_bytes(path))
+            except (OSError, RuntimeError, PermissionError, FileNotFoundError):
+                pass
+            merged = _merge_managed(existing, managed)
+            payload = merged.SerializeToString()
+            try:
+                previous = _read_bytes(path)
+            except (OSError, RuntimeError, PermissionError, FileNotFoundError):
+                previous = b""
+            if previous == payload:
+                log(f"route_rule.proto already up to date: {path}")
+                continue
+            _write_bytes(path, payload)
+            log(f"Wrote durable route rules -> {path}")
+            notes.append(f"route_rule.proto -> {path}")
+        except Exception as e:
+            notes.append(f"skip route_rule {path}: {e}")
+    if lan:
+        notes.append(
+            f"direct-dns-address set to office DNS {lan[0]} "
+            "(region .ir lookups use this instead of 1.1.1.1)"
+        )
+    notes.append(
+        "Fully quit Hiddify and start it again (or Disconnect→Connect) so "
+        "prefs + route_rule.proto rebuild the core with these excludes."
+    )
+    return notes
+
+
 def apply_prefs(path: Path, desired: dict[str, Any] = CURSOR_PREFS) -> tuple[bool, list[str]]:
     data = _read_json(path)
     changes: list[str] = []
@@ -317,6 +431,10 @@ def patch_hiddify(
     live_path: Optional[str] = None
     live_changed = False
     preferred: list[str] = []
+    bypass_spec = load_bypass_spec()
+    for note in apply_hiddify_native_bypass(bypass_spec):
+        if note not in notes:
+            notes.append(note)
     for path in list(config_paths or _default_config_paths()):
         if not _path_is_usable(path):
             continue
@@ -328,18 +446,20 @@ def patch_hiddify(
         live_path = str(path)
         preferred = preferred_node_tags(cfg)
         tun_changes = patch_live_tun(cfg)
-        if tun_changes:
+        bypass_changes = apply_bypass_to_config(cfg, bypass_spec)
+        live_edits = [*tun_changes, *bypass_changes]
+        if live_edits:
             try:
                 _write_json(path, cfg)
                 live_changed = True
-                log(f"Patched live TUN in {path}")
-                for line in tun_changes:
+                log(f"Patched live config in {path}")
+                for line in live_edits:
                     log(f"  {line}")
             except Exception as e:
                 notes.append(f"could not write live config {path}: {e}")
-                notes.append("Reconnect Hiddify so prefs MTU/stack apply.")
+                notes.append("Reconnect Hiddify so prefs MTU/stack/bypass apply.")
         else:
-            log(f"Live TUN already ok (or no tun inbound) in {path}")
+            log(f"Live TUN/bypass already ok (or no tun inbound) in {path}")
         break
 
     if preferred:
@@ -354,7 +474,8 @@ def patch_hiddify(
         notes.append(
             "Fully quit Hiddify (do not only disconnect), then start it again so "
             "Config Options reload: MTU 1400, TUN=system, mux/fragment/WARP off, "
-            "balancer=sticky-sessions. Then connect. Proxies must show a node, not Load Balance."
+            "balancer=sticky-sessions, and any bypass IPs/DNS. Then connect. "
+            "Proxies must show a node, not Load Balance."
         )
 
     return PatchResult(
@@ -386,3 +507,49 @@ def load_preferred_nodes(config_path: Optional[str] = None) -> list[str]:
             continue
         return preferred_node_tags(cfg)
     return []
+
+
+def apply_saved_bypass(
+    config_path: Optional[str] = None,
+    spec: Optional[BypassSpec] = None,
+) -> list[str]:
+    """Write saved (or given) bypass rules into the live Hiddify config."""
+    notes: list[str] = []
+    bypass_spec = spec if spec is not None else load_bypass_spec()
+    notes.extend(apply_system_no_proxy(bypass_spec))
+    notes.extend(apply_hiddify_native_bypass(bypass_spec))
+    if config_path:
+        paths = [Path(config_path)]
+    else:
+        paths = _default_config_paths()
+    applied = False
+    for path in paths:
+        if not _path_is_usable(path):
+            continue
+        try:
+            cfg = _read_json(path)
+        except Exception as e:
+            notes.append(f"skip config {path}: {e}")
+            continue
+        changes = apply_bypass_to_config(cfg, bypass_spec)
+        if not changes:
+            if not bypass_spec.is_empty():
+                log(f"Bypass already applied in {path}")
+            applied = True
+            continue
+        try:
+            _write_json(path, cfg)
+        except Exception as e:
+            notes.append(f"could not write live config {path}: {e}")
+            continue
+        applied = True
+        log(f"Applied bypass to {path}")
+        for line in changes:
+            log(f"  {line}")
+        notes.append(
+            "Reconnect Hiddify (disconnect/connect) so bypass IPs, LAN DNS, "
+            "and excluded names leave the VPN/proxy path."
+        )
+    if not applied:
+        notes.append("No live Hiddify current-config.json found to apply bypass.")
+    return notes

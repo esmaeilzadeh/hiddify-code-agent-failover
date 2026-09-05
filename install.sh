@@ -16,6 +16,11 @@ die() {
 
 chmod +x "$BIN" "$ROOT_DIR/install.sh" 2>/dev/null || true
 
+if [[ ! -f "$ROOT_DIR/.env" && -f "$ROOT_DIR/example.env" ]]; then
+  cp "$ROOT_DIR/example.env" "$ROOT_DIR/.env"
+  ok "Created .env from example.env (edit HIDDIFY_EXCLUDE_IPS / HIDDIFY_EXCLUDE_DNS)"
+fi
+
 cat <<'BANNER'
 
   Hiddify + Cursor  —  one-time setup

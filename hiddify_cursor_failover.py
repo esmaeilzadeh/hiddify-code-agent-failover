@@ -13,6 +13,7 @@ Examples:
   ./bin/hiddify-cursor-failover once
   ./bin/hiddify-cursor-failover watch
   ./bin/hiddify-cursor-failover refresh-secret
+  ./bin/hiddify-cursor-failover bypass --apply
 """
 
 from __future__ import annotations
@@ -28,9 +29,20 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from hiddify_cursor_patch import config_path_candidates, load_preferred_nodes, patch_hiddify
+from hiddify_cursor_patch import apply_saved_bypass, config_path_candidates, load_preferred_nodes, patch_hiddify
+from hiddify_bypass import (
+    BypassParseError,
+    bypass_file_path,
+    load_dotenv,
+    load_env_bypass_spec,
+    load_json_bypass_spec,
+    looks_like_env_file,
+    merge_spec,
+    save_bypass_spec,
+)
 
 DEFAULT_CONFIG_CANDIDATES = tuple(str(p) for p in config_path_candidates())
 
@@ -360,6 +372,8 @@ def pick_and_select(
 def maybe_patch(args: argparse.Namespace) -> list[str]:
     if getattr(args, "skip_patch", False):
         log("Skipping Hiddify config patch (--skip-patch)")
+        for note in apply_saved_bypass(getattr(args, "config", None)):
+            log(f"note: {note}")
         return load_preferred_nodes(args.config)
     result = patch_hiddify()
     for note in result.notes:
@@ -389,6 +403,80 @@ def measure_current(
     if not current or not is_real_server(current):
         return current, None
     return current, api.delay(current, test_url, timeout_ms)
+
+
+def _format_bypass_list(spec) -> str:
+    ips = ", ".join(spec.ips) if spec.ips else "(none)"
+    dns = ", ".join(spec.dns) if spec.dns else "(none)"
+    return f"  IPs: {ips}\n  DNS: {dns}"
+
+
+def cmd_bypass(args: argparse.Namespace) -> int:
+    import_path = getattr(args, "file", None)
+    mutating = any(
+        (
+            args.add_ip,
+            args.add_dns,
+            args.remove_ip,
+            args.remove_dns,
+            args.set_ip is not None,
+            args.set_dns is not None,
+            args.clear,
+        )
+    )
+    try:
+        env_label = "(.env)"
+        if import_path:
+            file_path = Path(import_path).expanduser()
+            if not file_path.exists():
+                raise BypassParseError(f"Bypass file not found: {import_path}")
+            if looks_like_env_file(file_path):
+                env_spec = load_env_bypass_spec(str(file_path))
+                json_spec = load_json_bypass_spec()
+                env_label = str(file_path)
+            else:
+                env_spec = load_env_bypass_spec()
+                json_spec = load_json_bypass_spec(str(file_path))
+                loaded = load_dotenv()
+                env_label = str(loaded) if loaded else "(.env)"
+        else:
+            env_spec = load_env_bypass_spec()
+            json_spec = load_json_bypass_spec()
+            loaded = load_dotenv()
+            env_label = str(loaded) if loaded else "(.env)"
+
+        if import_path and not mutating and not looks_like_env_file(Path(import_path).expanduser()):
+            saved = save_bypass_spec(json_spec)
+            log(f"Loaded extra bypass list from {import_path} -> {saved}")
+        elif mutating:
+            json_spec = merge_spec(
+                json_spec,
+                add_ips=args.add_ip,
+                add_dns=args.add_dns,
+                remove_ips=args.remove_ip,
+                remove_dns=args.remove_dns,
+                set_ips=args.set_ip,
+                set_dns=args.set_dns,
+                clear=args.clear,
+            )
+            saved = save_bypass_spec(json_spec)
+            log(f"Saved extra bypass list -> {saved}")
+            if args.clear:
+                log("note: --clear only drops bypass.json extras; HIDDIFY_EXCLUDE_* in .env still apply")
+            else:
+                log("note: main excludes live in .env (HIDDIFY_EXCLUDE_IPS / HIDDIFY_EXCLUDE_DNS)")
+        spec = merge_spec(env_spec, add_ips=json_spec.ips, add_dns=json_spec.dns)
+        log(f"Bypass list {env_label} + extras ({bypass_file_path()}):")
+        print(_format_bypass_list(spec), flush=True)
+        if args.save_only:
+            return 0
+        if mutating or args.apply or import_path:
+            for note in apply_saved_bypass(args.config, spec=spec):
+                log(f"note: {note}")
+        return 0
+    except BypassParseError as e:
+        log(str(e))
+        return 1
 
 
 def cmd_patch(args: argparse.Namespace) -> int:
@@ -510,6 +598,74 @@ def build_parser() -> argparse.ArgumentParser:
     patch = sub.add_parser("patch", help="Only patch Hiddify prefs/TUN for Cursor")
     patch.set_defaults(func=cmd_patch)
 
+    bypass = sub.add_parser(
+        "bypass",
+        help="Exclude IPs and DNS names from Hiddify VPN/proxy (direct)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    bypass.add_argument(
+        "--ip",
+        dest="add_ip",
+        action="append",
+        default=[],
+        help="IP, CIDR, or wildcard (192.168.*) to send DIRECT (repeatable)",
+    )
+    bypass.add_argument(
+        "--dns",
+        dest="add_dns",
+        action="append",
+        default=[],
+        help="DNS name, wildcard (*.example.com, *cdn*), or DNS server IP (repeatable)",
+    )
+    bypass.add_argument(
+        "--remove-ip",
+        dest="remove_ip",
+        action="append",
+        default=[],
+        help="Remove an IP/CIDR from the bypass list",
+    )
+    bypass.add_argument(
+        "--remove-dns",
+        dest="remove_dns",
+        action="append",
+        default=[],
+        help="Remove a DNS name from the bypass list",
+    )
+    bypass.add_argument(
+        "--set-ip",
+        dest="set_ip",
+        action="append",
+        default=None,
+        help="Replace the IP bypass list (repeatable)",
+    )
+    bypass.add_argument(
+        "--set-dns",
+        dest="set_dns",
+        action="append",
+        default=None,
+        help="Replace the DNS bypass list (repeatable)",
+    )
+    bypass.add_argument("--clear", action="store_true", help="Remove bypass.json extras (does not edit .env)")
+    bypass.add_argument(
+        "--file",
+        help="Load excludes from a .env or JSON file",
+    )
+    bypass.add_argument(
+        "--config",
+        help="Path to Hiddify current-config.json (else auto-detect)",
+    )
+    bypass.add_argument(
+        "--save-only",
+        action="store_true",
+        help="Update the saved list without writing live Hiddify config",
+    )
+    bypass.add_argument(
+        "--apply",
+        action="store_true",
+        help="Re-apply the saved list to the live Hiddify config",
+    )
+    bypass.set_defaults(func=cmd_bypass)
+
     once = sub.add_parser(
         "once",
         parents=[selection],
@@ -542,6 +698,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 def main(argv: Optional[list[str]] = None) -> int:
+    load_dotenv()
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)

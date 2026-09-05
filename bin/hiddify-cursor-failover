@@ -141,10 +141,54 @@ PY
   return 1
 }
 
+apply_root_bypass() {
+  # Live Hiddify (sudo) ignores the user-home config copy. Write root config
+  # so LAN DNS + RFC1918 excludes actually take effect.
+  sudo -E env PYTHONPATH="$ROOT_DIR" HIDDIFY_ENV_FILE="$ROOT_DIR/.env" \
+    python3 - "$ROOT_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+from hiddify_bypass import apply_bypass_to_config, load_bypass_spec
+from hiddify_cursor_patch import config_path_candidates
+
+root = Path(sys.argv[1])
+spec = load_bypass_spec()
+applied = False
+for path in config_path_candidates():
+    p = Path(path)
+    if not str(p).startswith("/root/") or not p.is_file():
+        continue
+    cfg = json.loads(p.read_text(encoding="utf-8"))
+    changes = apply_bypass_to_config(cfg, spec)
+    applied = True
+    if not changes:
+        print(f"Bypass already applied in {p}")
+        continue
+    bak = Path(str(p) + ".bak-failover")
+    if not bak.exists():
+        bak.write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+    p.write_text(json.dumps(cfg, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
+    print(f"Applied bypass to {p}")
+    for line in changes:
+        print(f"  {line}")
+if not applied:
+    sys.exit("No root Hiddify current-config.json found")
+PY
+}
+
 cmd="${1:-}"
 if [[ "$cmd" == "refresh-secret" ]]; then
   refresh_secret
+  apply_root_bypass || true
   exit 0
+fi
+
+if [[ "$cmd" == "patch" || "$cmd" == "once" || "$cmd" == "watch" || ( "$cmd" == "bypass" && " $* " == *" --apply "* ) ]]; then
+  if _hiddify_runs_as_root; then
+    apply_root_bypass || echo "note: could not write root Hiddify config (sudo). LAN DNS bypass needs: sudo $0 bypass --apply" >&2
+  fi
 fi
 
 if [[ ! -f "$SECRET_FILE" ]]; then
