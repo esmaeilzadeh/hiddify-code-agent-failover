@@ -4,11 +4,15 @@
   <img src="logo.png" alt="Hiddify Cursor Failover" width="280">
 </p>
 
-An open-source **Linux** helper so **Cursor Agent** stays stable over **Hiddify**.
-
-ابزار اوپن‌سورس لینوکس برای پایدار ماندن **Cursor Agent** روی **هیدیفای**.
+<p align="center">
+  <a href="#english">English</a> · <a href="#فارسی">فارسی</a>
+</p>
 
 ---
+
+# English
+
+An open-source **Linux** helper so **Cursor Agent** stays stable over **Hiddify**.
 
 ## Does Cursor Agent keep dropping over VPN?
 
@@ -20,19 +24,6 @@ On many **Hiddify / VPN** setups that connection fails in annoying ways:
 - It works for a few seconds, then hangs until you Retry
 - Some nodes look “fine” in a browser test, but they break the Agent stream
 - Switching nodes by hand is slow, and a “fast” node is not always good for Cursor
-
-### فارسی — آیا اتصال Cursor Agent موقع کار با VPN مدام قطع می‌شود؟
-
-درخواست **Agent** در Cursor یک درخواست کوتاه معمولی نیست. یک اتصال **استریم طولانی** به سرورهای Cursor باز می‌کند و تا وقتی Agent کار می‌کند (فکر کردن، خواندن فایل، استریم توکن) این اتصال باز می‌ماند.
-
-روی خیلی از تنظیمات **Hiddify / VPN** این اتصال به شکل‌های آزاردهنده قطع می‌شود:
-
-- Agent شروع می‌شود، وسط کار می‌ایستد یا بدون خطای واضح قطع می‌شود
-- چند ثانیه کار می‌کند، بعد hang می‌شود تا دوباره Retry کنید
-- بعضی نودها در تست مرورگر «خوب» به‌نظر می‌رسند، ولی استریم Agent را خراب می‌کنند
-- عوض کردن دستی نود وقت‌گیر است و نود «سریع» لزوماً برای Cursor مناسب نیست
-
----
 
 ## What this project does
 
@@ -46,23 +37,7 @@ It uses Hiddify’s Clash-compatible API. Standard-library Python only — no ex
 
 This does **not** replace or rewrite the Hiddify app. You run this repo; it writes Hiddify’s own prefs/config and can be applied again anytime.
 
-### فارسی — این پروژه چه می‌کند
-
-**Hiddify Cursor Failover** سه کار می‌کند:
-
-1. **Patch** — تنظیم prefs/TUN در هیدیفای برای استریم‌های طولانی Agent (DNS، MTU، stack؛ خاموش کردن mux / fragment / WARP)
-2. **Failover** — تست نودها (ترجیح Reality TCP)، انتخاب بهترین نود، و سوئیچ خودکار وقتی کیفیت افت می‌کند
-3. **Bypass شبکهٔ محلی** — IP و DNS داخلی/شرکتی انتخابی را **DIRECT** نگه می‌دارد (از VPN خارج) و بعد از Connect هم excludeها را از نو می‌سازد
-
-از API سازگار با Clash در هیدیفای استفاده می‌کند. فقط کتابخانهٔ استاندارد پایتون — بدون dependency اضافه. سرویس systemd هم برای مانیتورینگ مداوم دارد.
-
-این ابزار باینری هیدیفای را عوض نمی‌کند. همین پروژه را اجرا می‌کنید؛ تنظیمات را در فایل‌های خود هیدیفای می‌نویسد و هر وقت بخواهید دوباره اعمال می‌شود.
-
----
-
-## Install (one time) / نصب (یک‌بار)
-
-### English
+## Install (one time)
 
 1. Open **Hiddify** and click **Connect**. Leave it connected.
 2. Open a terminal **in this folder** and run:
@@ -78,7 +53,66 @@ That is all. Leave Hiddify open. The helper runs in the background and chooses t
 
 If Agent breaks after you close and reopen Hiddify, run `bash install.sh` again.
 
-### فارسی
+## Do office / LAN sites die as soon as Hiddify TUN is on?
+
+Hiddify **TUN** is a system-wide tunnel. Almost every packet — including your **LAN**, **office intranet**, and **office DNS** — can be pulled into the VPN.
+
+That is not the same as “the VPN is slow.” Local things stop working in confusing ways:
+
+- Internal names (`intranet.company.local`, a region suffix like `*.ir` on a split-horizon network) return **NXDOMAIN** or the **wrong public IP**, because the query went to `1.1.1.1` instead of the office resolver
+- The office DNS IP itself (something like `192.168.1.1`) is routed **via `tun0`**, so even the right resolver is unreachable
+- `curl` / Agent still go through `127.0.0.1:12334` because `NO_PROXY` has `*.company.local` — curl **ignores** that form; it needs `.company.local`
+- You patch the live `current-config.json`, reconnect, and the excludes are **gone**: Hiddify **rebuilds** that file on every Connect
+
+Hiddify’s own “bypass LAN” switch is often not enough on Linux with `strict_route` / `auto_route`. You need durable DIRECT rules (IPs + DNS) that survive Connect, office DNS for split-horizon names, and a curl-safe `NO_PROXY`.
+
+### What this feature does
+
+1. You list excludes in `.env` (`HIDDIFY_EXCLUDE_IPS`, `HIDDIFY_EXCLUDE_DNS`, optional `HIDDIFY_DIRECT_DNS`)
+2. `bypass --apply` writes them into Hiddify **prefs** + **`route_rule.proto`** (not only the live JSON)
+3. It also writes curl-safe `NO_PROXY` (`.ir`, not `*.ir`)
+4. After you quit/reconnect Hiddify, Connect **regenerates** the same DIRECT excludes
+
+```bash
+cp example.env .env
+# edit HIDDIFY_EXCLUDE_IPS, HIDDIFY_EXCLUDE_DNS, optional HIDDIFY_DIRECT_DNS
+./bin/hiddify-cursor-failover bypass --apply
+```
+
+Then quit and reopen Hiddify (or Disconnect → Connect). Wildcards: `192.168.*`, `*.company.local`. See `example.env`.
+
+CLI extras and paths: [Advanced](#advanced).
+
+---
+
+# فارسی
+
+ابزار اوپن‌سورس لینوکس برای پایدار ماندن **Cursor Agent** روی **هیدیفای**.
+
+## آیا اتصال Cursor Agent موقع کار با VPN مدام قطع می‌شود؟
+
+درخواست **Agent** در Cursor یک درخواست کوتاه معمولی نیست. یک اتصال **استریم طولانی** به سرورهای Cursor باز می‌کند و تا وقتی Agent کار می‌کند (فکر کردن، خواندن فایل، استریم توکن) این اتصال باز می‌ماند.
+
+روی خیلی از تنظیمات **Hiddify / VPN** این اتصال به شکل‌های آزاردهنده قطع می‌شود:
+
+- Agent شروع می‌شود، وسط کار می‌ایستد یا بدون خطای واضح قطع می‌شود
+- چند ثانیه کار می‌کند، بعد hang می‌شود تا دوباره Retry کنید
+- بعضی نودها در تست مرورگر «خوب» به‌نظر می‌رسند، ولی استریم Agent را خراب می‌کنند
+- عوض کردن دستی نود وقت‌گیر است و نود «سریع» لزوماً برای Cursor مناسب نیست
+
+## این پروژه چه می‌کند
+
+**Hiddify Cursor Failover** سه کار می‌کند:
+
+1. **Patch** — تنظیم prefs/TUN در هیدیفای برای استریم‌های طولانی Agent (DNS، MTU، stack؛ خاموش کردن mux / fragment / WARP)
+2. **Failover** — تست نودها (ترجیح Reality TCP)، انتخاب بهترین نود، و سوئیچ خودکار وقتی کیفیت افت می‌کند
+3. **Bypass شبکهٔ محلی** — IP و DNS داخلی/شرکتی انتخابی را **DIRECT** نگه می‌دارد (از VPN خارج) و بعد از Connect هم excludeها را از نو می‌سازد
+
+از API سازگار با Clash در هیدیفای استفاده می‌کند. فقط کتابخانهٔ استاندارد پایتون — بدون dependency اضافه. سرویس systemd هم برای مانیتورینگ مداوم دارد.
+
+این ابزار باینری هیدیفای را عوض نمی‌کند. همین پروژه را اجرا می‌کنید؛ تنظیمات را در فایل‌های خود هیدیفای می‌نویسد و هر وقت بخواهید دوباره اعمال می‌شود.
+
+## نصب (یک‌بار)
 
 1. **هیدیفای** را باز کنید و **Connect** بزنید. وصل بماند.
 2. در **همین پوشه** ترمینال باز کنید و این را بزنید:
@@ -94,37 +128,7 @@ bash install.sh
 
 اگر بعد از بستن و باز کردن هیدیفای، Agent خراب شد، دوباره `bash install.sh` را اجرا کنید.
 
----
-
-## Do office / LAN sites die as soon as Hiddify TUN is on?
-
-Hiddify **TUN** is a system-wide tunnel. Almost every packet — including your **LAN**, **office intranet**, and **office DNS** — can be pulled into the VPN.
-
-That is not the same as “the VPN is slow.” Local things stop working in confusing ways:
-
-- Internal names (`intranet.company.local`, a region suffix like `*.ir` on a split-horizon network) return **NXDOMAIN** or the **wrong public IP**, because the query went to `1.1.1.1` instead of the office resolver
-- The office DNS IP itself (something like `192.168.1.1`) is routed **via `tun0`**, so even the right resolver is unreachable
-- `curl` / Agent still go through `127.0.0.1:12334` because `NO_PROXY` has `*.company.local` — curl **ignores** that form; it needs `.company.local`
-- You patch the live `current-config.json`, reconnect, and the excludes are **gone**: Hiddify **rebuilds** that file on every Connect
-
-Hiddify’s own “bypass LAN” switch is often not enough on Linux with `strict_route` / `auto_route`. You need durable DIRECT rules (IPs + DNS) that survive Connect, office DNS for split-horizon names, and a curl-safe `NO_PROXY`.
-
-**What this feature does**
-
-1. You list excludes in `.env` (`HIDDIFY_EXCLUDE_IPS`, `HIDDIFY_EXCLUDE_DNS`, optional `HIDDIFY_DIRECT_DNS`)
-2. `bypass --apply` writes them into Hiddify **prefs** + **`route_rule.proto`** (not only the live JSON)
-3. It also writes curl-safe `NO_PROXY` (`.ir`, not `*.ir`)
-4. After you quit/reconnect Hiddify, Connect **regenerates** the same DIRECT excludes
-
-```bash
-cp example.env .env
-# edit HIDDIFY_EXCLUDE_IPS, HIDDIFY_EXCLUDE_DNS, optional HIDDIFY_DIRECT_DNS
-./bin/hiddify-cursor-failover bypass --apply
-```
-
-Then quit and reopen Hiddify (or Disconnect → Connect). Wildcards: `192.168.*`, `*.company.local`. See `example.env`.
-
-### فارسی — آیا با روشن شدن TUN هیدیفای، شبکهٔ محلی/شرکت از کار می‌افتد؟
+## آیا با روشن شدن TUN هیدیفای، شبکهٔ محلی/شرکت از کار می‌افتد؟
 
 حالت **TUN** هیدیفای یک تونل سراسری است. تقریباً همهٔ بسته‌ها — از جمله **LAN**، **اینترانت شرکت** و **DNS اداری** — ممکن است داخل VPN بروند.
 
@@ -137,18 +141,24 @@ Then quit and reopen Hiddify (or Disconnect → Connect). Wildcards: `192.168.*`
 
 گزینهٔ خود هیدیفای برای «bypass LAN» روی لینوکس با `strict_route` / `auto_route` اغلب کافی نیست. به قانون‌های DIRECT پایدار (IP + DNS) که بعد از Connect بمانند، DNS دفتر برای نام‌های split-horizon، و `NO_PROXY` سازگار با curl نیاز دارید.
 
-**این قابلیت چه می‌کند**
+### این قابلیت چه می‌کند
 
 1. excludeها را در `.env` می‌نویسید (`HIDDIFY_EXCLUDE_IPS`، `HIDDIFY_EXCLUDE_DNS`، در صورت نیاز `HIDDIFY_DIRECT_DNS`)
 2. `bypass --apply` آن‌ها را در **prefs** و **`route_rule.proto`** هیدیفای می‌نویسد (نه فقط JSON زنده)
 3. `NO_PROXY` سازگار با curl را هم می‌نویسد (`.ir` نه `*.ir`)
 4. بعد از قطع/وصل هیدیفای، Connect همان excludeهای DIRECT را **دوباره می‌سازد**
 
-از `example.env` فایل `.env` بسازید، ویرایش کنید، `bypass --apply` بزنید، سپس هیدیفای را قطع/وصل کنید.
+```bash
+cp example.env .env
+# HIDDIFY_EXCLUDE_IPS و HIDDIFY_EXCLUDE_DNS را ویرایش کنید
+./bin/hiddify-cursor-failover bypass --apply
+```
+
+سپس هیدیفای را ببندید و دوباره باز کنید (یا Disconnect → Connect). جزئیات فنی: [Advanced](#advanced).
 
 ---
 
-## Advanced / برای افراد فنی
+# Advanced
 
 Needs Linux, Hiddify running, `python3`, and `sudo` if Hiddify was started with sudo.
 
@@ -171,7 +181,7 @@ Cached API secret (do not commit): `~/.config/hiddify-cursor/clash_secret`
 
 Bypass excludes: `.env` (`HIDDIFY_EXCLUDE_IPS` / `HIDDIFY_EXCLUDE_DNS`). Copy `example.env` to `.env`. Optional extras: `~/.config/hiddify-cursor/bypass.json`
 
-### What `patch` changes
+## What `patch` changes
 
 | Key | Value | Why |
 |-----|-------|-----|
@@ -194,7 +204,7 @@ Bypass excludes: `.env` (`HIDDIFY_EXCLUDE_IPS` / `HIDDIFY_EXCLUDE_DNS`). Copy `e
 
 Hiddify has no “agent long connection” switch. Patch while the app is **quit** if you want Config Options to show these values.
 
-### Bypass IPs and DNS / عبور مستقیم IP و DNS
+## Bypass IPs and DNS
 
 ```bash
 ./bin/hiddify-cursor-failover bypass                          # show merged list
@@ -217,9 +227,7 @@ Internal names (split-horizon, e.g. `intranet.company.local`) need **office DNS*
 
 Quit/reopen Hiddify (or Disconnect→Connect) after apply so the core regenerates from those.
 
-IPها و نام‌های DNS را در `.env` بگذارید (از `example.env` کپی کنید). بعد از تغییر، هیدیفای را قطع/وصل کنید.
-
-### How failover picks a node
+## How failover picks a node
 
 1. Skip subscription banner rows
 2. Prefer Reality + TCP (skip ws / http / grpc / CDN transports)
